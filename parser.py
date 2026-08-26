@@ -26,7 +26,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
 def run_health_server():
-    server = HTTPServer(("0.0.0.0", 10000), HealthCheckHandler)
+    server = HTTPServer(("0.0.0.0", 10001), HealthCheckHandler)
     server.serve_forever()
 # ------------------------------------------------------------------
 
