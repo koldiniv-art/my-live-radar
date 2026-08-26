@@ -10,10 +10,13 @@ TELEGRAM_CHAT_ID = "546949841"
 # Официальный live-поток серверов Sofascore
 API_URL = "https://sofascore.com"
 
-# Маскировка под реальный браузер Safari на Айфоне для обхода блокировок 403
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
 }
+
+# Хранилище истории набора очков для точного отслеживания 60-секундных взрывов
+# Структура: { match_id: [(elapsed_seconds, score), ...] }
+MATCH_HISTORY = {}
 
 # --- ВЕБ-СЕРВЕР ДЛЯ ОБХОДА И ЗАПУСКА НА БЕСПЛАТНОМ ТАРИФЕ RENDER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -38,23 +41,21 @@ def send_telegram_alert(message):
         print(f"Ошибка отправки сообщения: {e}")
 
 def check_four_factor_model(match_data):
-    """Четырехфакторное ядро: Pace, Реализация, Настрел, Тотал БК"""
+    """Ядро динамической экстраполяции: связка Минутного взрыва и % Реализации"""
     
-    # Парсим названия команд из структуры Sofascore
+    match_id = str(match_data.get("id", "0"))
     team_home = match_data.get("homeTeam", {}).get("name", "Home")
     team_away = match_data.get("awayTeam", {}).get("name", "Away")
     
-    # Парсим live-счет матча
     score_home = int(match_data.get("homeScore", {}).get("current", 0))
     score_away = int(match_data.get("awayScore", {}).get("current", 0))
     total_score = score_home + score_away
 
-    # Извлекаем текущий статус и минуту игры
     status = match_data.get("status", {})
     description = status.get("description", "")
     current_minute = float(status.get("minutes", 0)) if status.get("minutes") else 0.0
 
-    # Автоматически определяем параметры оставшегося времени для текущей четверти (ФИБА/ЖНБА)
+    # Автоматически определяем параметры секунд для текущей четверти (ФИБА/ЖНБА — 10 минут)
     if "1st quarter" in description.lower():
         elapsed_seconds_in_quarter = current_minute * 60
         quarter_score = total_score
@@ -68,18 +69,37 @@ def check_four_factor_model(match_data):
         elapsed_seconds_in_quarter = (current_minute - 30) * 60
         quarter_score = total_score - int(match_data.get("homeScore", {}).get("period1", 0)) - int(match_data.get("awayScore", {}).get("period1", 0)) - int(match_data.get("homeScore", {}).get("period2", 0)) - int(match_data.get("awayScore", {}).get("period2", 0)) - int(match_data.get("homeScore", {}).get("period3", 0)) - int(match_data.get("awayScore", {}).get("period3", 0))
     else:
-        return # Игра еще не началась или перерыв
+        if match_id in MATCH_HISTORY: del MATCH_HISTORY[match_id]
+        return 
 
-    # Длина четверти ФИБА/ЖНБА — 10 минут (600 секунд)
     QUARTER_LENGTH = 600
     remaining_seconds = QUARTER_LENGTH - elapsed_seconds_in_quarter
 
-    # Парсим текущую live-планку Тотала Четверти от Betradar и фолы
+    # Срезы не делаем на самых первых и последних секундах периода
+    if elapsed_seconds_in_quarter <= 60 or remaining_seconds <= 30:
+        return
+
+    # Запись текущей точки счета в историю матча
+    if match_id not in MATCH_HISTORY:
+        MATCH_HISTORY[match_id] = []
+    MATCH_HISTORY[match_id].append((elapsed_seconds_in_quarter, quarter_score))
+
+    # Фильтруем историю, оставляя точки строго за последние 60 секунд чистой игры
+    MATCH_HISTORY[match_id] = [t for t in MATCH_HISTORY[match_id] if elapsed_seconds_in_quarter - t[0] <= 60]
+
+    # 1. РАСЧЕТ ТРИГГЕРА «МИНУТНЫЙ ВЗРЫВ» (Скользящее 60-секундное окно)
+    if len(MATCH_HISTORY[match_id]) > 1:
+        oldest_point = MATCH_HISTORY[match_id][0][1]
+        points_in_last_minute = quarter_score - oldest_point
+    else:
+        points_in_last_minute = 0
+
+    # Текущие котировки Betradar и фолы
     bk_live_quarter_total = float(match_data.get("liveTotalLine", 0))
     fouls_home = int(match_data.get("homeFouls", 0))
     fouls_away = int(match_data.get("awayFouls", 0))
 
-    # Извлекаем бросковые данные Advanced Stats с Sofascore
+    # Данные расширенной статистики бросков с Sofascore
     stats = match_data.get("statistics", {})
     fga_home = int(stats.get("fieldGoalsAttemptedHome", 0))
     fga_away = int(stats.get("fieldGoalsAttemptedAway", 0))
@@ -89,36 +109,40 @@ def check_four_factor_model(match_data):
     fgm_away = int(stats.get("fieldGoalsMadeAway", 0))
     total_fgm = fgm_home + fgm_away 
 
-    # Делаем срез строго на экваторе четверти (от 4.0 до 6.5 минут чистой игры)
-    if 4.0 <= elapsed_seconds_in_quarter / 60 <= 6.5 and elapsed_seconds_in_quarter > 0:
-        
-        current_fg_pct = (total_fgm / total_fga * 100) if total_fga > 0 else 0
+    if total_fga > 0 and elapsed_seconds_in_quarter > 0:
+        # Рассчитываем реальный процент реализации с игры и фоновый темп
+        current_fg_pct = (total_fgm / total_fga * 100)
         points_per_second_in_quarter = quarter_score / elapsed_seconds_in_quarter
 
-        # Формула экстраполяции темпа: математический предел на остаток секунд четверти
+        # Базовая экстраполяция темпа на остаток секунд
         max_projected_quarter_total = quarter_score + (points_per_second_in_quarter * remaining_seconds)
         current_pace = (total_fga * 600 / elapsed_seconds_in_quarter) * 4 
 
-        # 🛡 КРИТИЧЕСКИЕ ПРЕДОХРАНИТЕЛИ БЕЗОПАСНОСТИ БАНКА
-        if fouls_home > 2 or fouls_away > 2: return  # Ранние фолы сожрут ТМ штрафными
-        if current_pace > 95.0: return  # Сверхзвуковой хаос ломает формулу
+        # 🛡 ЖЕСТКИЕ ПРЕДОХРАНИТЕЛИ БЕЗОПАСНОСТИ БАНКА
+        if fouls_home > 2 or fouls_away > 2: return  # Исключаем штрафной конвейер при остановленном таймере
+        if current_pace > 95.0: return  # Исключаем тотальный хаос "бей-беги" без тренера
 
-        # 🎯 ТРИГГЕР: Настрел больше 30 и Линия БК выше математически возможного максимума времени
-        if quarter_score >= 30 and bk_live_quarter_total > max_projected_quarter_total:
-            
-            value_delta = bk_live_quarter_total - max_projected_quarter_total
+        # 🎯 ДИНАМИЧЕСКИЙ ТРИГГЕР: Минутный взрыв совпадает с высоким % реализации куража основы
+        if points_in_last_minute >= 8 and current_fg_pct >= 58.0:
+            # Проверяем, завысил ли букмекер тотал БЫСТРЕЕ математического предела времени
+            if bk_live_quarter_total > max_projected_quarter_total:
+                
+                value_delta = bk_live_quarter_total - max_projected_quarter_total
 
-            msg = (
-                f"🚨 *ТРИГГЕР: ЛОВУШКА ИНЕРЦИИ БК (ТМ)*\n"
-                f"🏀 Матч: {team_home} vs {team_away}\n"
-                f"⏱ Минута матча: {current_minute:.1f} | Счет четверти: {quarter_score}\n"
-                f"📊 Pace: {current_pace:.1f} | Реализация: {current_fg_pct:.1f}%\n"
-                f"📈 Предел при сохр. темпа: *{max_projected_quarter_total:.1f}*\n"
-                f"📉 Линия Тотала БК в лайве: *{bk_live_quarter_total:.1f}*\n"
-                f"🎁 Чистый перевес: +{value_delta:.1f} очка!\n\n"
-                f"🔥 *ДЕЙСТВИЕ:* Ординар на ТМ {bk_live_quarter_total} в текущей четверти! 🔒"
-            )
-            send_telegram_alert(msg)
+                # Генерируем алерт, если чистый перевес в нашу пользу составляет >= 1.5 полных очка
+                if value_delta >= 1.5:
+                    msg = (
+                        f"🚨 *ТРИГГЕР: МИНУТНЫЙ ВЗРЫВ (ТМ)*\n"
+                        f"🏀 Матч: {team_home} vs {team_away}\n"
+                        f"⏱ Минута матча: {current_minute:.1f} | Счет четверти: {quarter_score}\n"
+                        f"🔥 Шок-вспышка: +{points_in_last_minute} очк. за 60 сек!\n"
+                        f"📊 Pace: {current_pace:.1f} | Реализация: {current_fg_pct:.1f}%\n"
+                        f"📈 Предел секунд матча: *{max_projected_quarter_total:.1f}*\n"
+                        f"📉 Перегретая линия БК: *{bk_live_quarter_total:.1f}*\n"
+                        f"🎁 Чистый валуй: +{value_delta:.1f} очка!\n\n"
+                        f"🔥 *ДЕЙСТВИЕ:* Ординар на ТМ {bk_live_quarter_total} в текущей четверти! 🔒"
+                    )
+                    send_telegram_alert(msg)
 
 def main_loop():
     print("Софт успешно запущен на Render. Мониторинг активен...")
@@ -132,10 +156,10 @@ def main_loop():
         except Exception as e: 
             print(f"Ошибка запроса к API: {e}")
         
-        # Высокоскоростной интервал опроса: 7 секунд
+        # Высокоскоростной интервал опроса Sofascore — 7 секунд
         time.sleep(7)
 
 if __name__ == "__main__":
-    # Запуск параллельного веб-сервера на порту 10000 для удержания бесплатного тарифа Render
+    # Веб-сервер на порту 10000 для сохранения бесплатного тарифа Web Service на Render
     Thread(target=run_health_server, daemon=True).start()
     main_loop()
