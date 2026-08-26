@@ -15,7 +15,6 @@ HEADERS = {
 }
 
 # Хранилище истории набора очков для точного отслеживания 60-секундных взрывов
-# Структура: { match_id: [(elapsed_seconds, score), ...] }
 MATCH_HISTORY = {}
 
 # --- ВЕБ-СЕРВЕР ДЛЯ ОБХОДА И ЗАПУСКА НА БЕСПЛАТНОМ ТАРИФЕ RENDER ---
@@ -41,7 +40,7 @@ def send_telegram_alert(message):
         print(f"Ошибка отправки сообщения: {e}")
 
 def check_four_factor_model(match_data):
-    """Ядро динамической экстраполяции: связка Минутного взрыва и % Реализации"""
+    """Ядро Версии 3.2: Фильтрация трендов лиги, Box Score скорреров и лимитов времени"""
     
     match_id = str(match_data.get("id", "0"))
     team_home = match_data.get("homeTeam", {}).get("name", "Home")
@@ -75,22 +74,29 @@ def check_four_factor_model(match_data):
     QUARTER_LENGTH = 600
     remaining_seconds = QUARTER_LENGTH - elapsed_seconds_in_quarter
 
-    # Срезы не делаем на самых первых и последних секундах периода
+    # Срезы делаем строго на экваторе четверти
     if elapsed_seconds_in_quarter <= 60 or remaining_seconds <= 30:
+        return
+
+    # --- ФАКТОР 1: ИСКЛЮЧЕНИЕ КОМАНД С ВЫСОКИМ % РЕАЛИЗАЦИИ ПО ЛИГЕ ---
+    # Парсим сезонный показатель FG%. Если данных нет (холодный старт), подставляем безопасную константу лиги 43.5%
+    home_season_fg = float(match_data.get("homeTeam", {}).get("statistics", {}).get("fieldGoalPercentage", 43.5))
+    away_season_fg = float(match_data.get("awayTeam", {}).get("statistics", {}).get("fieldGoalPercentage", 43.5))
+    
+    # Жесткий предохранитель: если любая команда системно забивает > 46.5% по лиге — полный пропуск матча!
+    if home_season_fg > 46.5 or away_season_fg > 46.5:
         return
 
     # Запись текущей точки счета в историю матча
     if match_id not in MATCH_HISTORY:
         MATCH_HISTORY[match_id] = []
     MATCH_HISTORY[match_id].append((elapsed_seconds_in_quarter, quarter_score))
+    MATCH_HISTORY[match_id] = [t for t in MATCH_HISTORY[match_id] if elapsed_seconds_in_quarter - t <= 60]
 
-    # Фильтруем историю, оставляя точки строго за последние 60 секунд чистой игры
-    MATCH_HISTORY[match_id] = [t for t in MATCH_HISTORY[match_id] if elapsed_seconds_in_quarter - t[0] <= 60]
-
-    # 1. РАСЧЕТ ТРИГГЕРА «МИНУТНЫЙ ВЗРЫВ» (Скользящее 60-секундное окно)
+    # Расчет триггера «Минутный взрыв» (за последние 60 секунд чистой игры)
     if len(MATCH_HISTORY[match_id]) > 1:
-        oldest_point = MATCH_HISTORY[match_id][0][1]
-        points_in_last_minute = quarter_score - oldest_point
+        oldest_point = MATCH_HISTORY[match_id][0]
+        points_in_last_minute = quarter_score - oldest_point[1]
     else:
         points_in_last_minute = 0
 
@@ -110,29 +116,43 @@ def check_four_factor_model(match_data):
     total_fgm = fgm_home + fgm_away 
 
     if total_fga > 0 and elapsed_seconds_in_quarter > 0:
-        # Рассчитываем реальный процент реализации с игры и фоновый темп
         current_fg_pct = (total_fgm / total_fga * 100)
         points_per_second_in_quarter = quarter_score / elapsed_seconds_in_quarter
 
-        # Базовая экстраполяция темпа на остаток секунд
+        # Линейная экстраполяция темпа на остаток секунд
         max_projected_quarter_total = quarter_score + (points_per_second_in_quarter * remaining_seconds)
         current_pace = (total_fga * 600 / elapsed_seconds_in_quarter) * 4 
 
-        # 🛡 ЖЕСТКИЕ ПРЕДОХРАНИТЕЛИ БЕЗОПАСНОСТИ БАНКА
-        if fouls_home > 2 or fouls_away > 2: return  # Исключаем штрафной конвейер при остановленном таймере
+        # --- ФАКТОР 2: ИСКЛЮЧЕНИЕ МАТЧЕЙ С 3+ СУПЕР-СКОРРЕРАМИ (BOX SCORE CHECK) ---
+        # Сканируем live-список игроков на предмет запредельного индивидуального куража
+        players_sharing = match_data.get("playersPerformance", [])
+        super_scorers_count = 0
+        for player in players_sharing:
+            p_points = int(player.get("points", 0))
+            p_fga = int(player.get("fieldGoalsAttempted", 0))
+            p_fgm = int(player.get("fieldGoalsMade", 0))
+            p_fg_pct = (p_fgm / p_fga * 100) if p_fga > 0 else 0
+            # Если игрок уже набрал >= 8 очков с реализацией >= 60% — это супер-скорреер
+            if p_points >= 8 and p_fg_pct >= 60.0:
+                super_scorers_count += 1
+        
+        # Если таких "горячих" лидеров на паркете 3 или больше — ротация лавки не спасет ТМ. Сброс!
+        if super_scorers_count >= 3:
+            return
+
+        # 🛡 КРИТИЧЕСКИЕ ПРЕДОХРАНИТЕЛИ БЕЗОПАСНОСТИ БАНКА
+        if fouls_home > 2 or fouls_away > 2: return  # Ранние фолы сожрут ТМ штрафными
         if current_pace > 95.0: return  # Исключаем тотальный хаос "бей-беги" без тренера
 
-        # 🎯 ДИНАМИЧЕСКИЙ ТРИГГЕР: Минутный взрыв совпадает с высоким % реализации куража основы
+        # 🎯 ДИНАМИЧЕСКИЙ ТРИГГЕР ВЕРСИИ 3.2:
         if points_in_last_minute >= 8 and current_fg_pct >= 58.0:
-            # Проверяем, завысил ли букмекер тотал БЫСТРЕЕ математического предела времени
             if bk_live_quarter_total > max_projected_quarter_total:
                 
                 value_delta = bk_live_quarter_total - max_projected_quarter_total
 
-                # Генерируем алерт, если чистый перевес в нашу пользу составляет >= 1.5 полных очка
                 if value_delta >= 1.5:
                     msg = (
-                        f"🚨 *ТРИГГЕР: МИНУТНЫЙ ВЗРЫВ (ТМ)*\n"
+                        f"🚨 *БАСКЕТБОЛ: ИНТЕЛЛЕКТУАЛЬНЫЙ ТРИГГЕР (ТМ)*\n"
                         f"🏀 Матч: {team_home} vs {team_away}\n"
                         f"⏱ Минута матча: {current_minute:.1f} | Счет четверти: {quarter_score}\n"
                         f"🔥 Шок-вспышка: +{points_in_last_minute} очк. за 60 сек!\n"
@@ -156,10 +176,9 @@ def main_loop():
         except Exception as e: 
             print(f"Ошибка запроса к API: {e}")
         
-        # Высокоскоростной интервал опроса Sofascore — 7 секунд
+        # Высокоскоростной шаг опроса — 7 секунд
         time.sleep(7)
 
 if __name__ == "__main__":
-    # Веб-сервер на порту 10000 для сохранения бесплатного тарифа Web Service на Render
     Thread(target=run_health_server, daemon=True).start()
     main_loop()
