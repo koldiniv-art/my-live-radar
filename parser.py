@@ -52,7 +52,7 @@ def main_loop():
                 matches_list = response.json().get("events", [])
                 for match in matches_list: check_four_factor_model(match)
         except Exception as e: print(f"Ошибка: {e}")
-        time.sleep(15)
+        time.sleep(7)
 
 if __name__ == "__main__":
     # Запускаем веб-сервер в отдельном потоке, чтобы Render видел "живой сайт"
