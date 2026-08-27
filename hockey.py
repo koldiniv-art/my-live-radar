@@ -25,26 +25,26 @@ def send_telegram_alert(message):
 def check_test(match_data):
     team_home = match_data.get("homeTeam", {}).get("name", "Home")
     team_away = match_data.get("awayTeam", {}).get("name", "Away")
-    score_home = int(match_data.get("homeScore", {}).get("current", 0))
-    score_away = int(match_data.get("awayScore", {}).get("current", 0))
     
-    # ТЕСТОВЫЙ ТРИГГЕР: Любой идущий матч, где есть хотя бы 1 шайба
-    if (score_home + score_away) >= 1:
-        msg = (
-            f"🏒 *ТЕСТ СВЯЗИ: ХОККЕЙ ЖИВОЙ ЭФИР*\n"
-            f"Матч: {team_home} vs {team_away}\n"
-            f"Текущий live-счет: {score_home}:{score_away}\n"
-            f"✅ Сервер Render успешно парсит хоккей!"
-        )
-        send_telegram_alert(msg)
+    # МАКСИМАЛЬНЫЙ ТЕСТ: Нам плевать на периоды и броски! 
+    # Если матч просто есть в лайве Sofascore — шлем пуш каждые 7 секунд!
+    msg = (
+        f"🏒 *УЛЬТРА-ТЕСТ: ХОККЕЙ ВИДИТ ЛАЙВ*\n"
+        f"Матч: {team_home} vs {team_away}\n"
+        f"✅ Соединение с сервером Render монолитно!"
+    )
+    send_telegram_alert(msg)
 
 def main_loop():
-    print("Тестовый ХОККЕЙНЫЙ скрипт запущен...")
+    print("Ультра-тест хоккея запущен...")
     while True:
         try:
             response = requests.get(API_URL, headers=HEADERS, timeout=10)
             if response.status_code == 200:
-                for match in response.json().get("events", []): check_test(match)
+                events = response.json().get("events", [])
+                print(f"Найдено матчей в лайве: {len(events)}")
+                for match in events: 
+                    check_test(match)
         except Exception as e: print(f"Ошибка: {e}")
         time.sleep(7)
 
