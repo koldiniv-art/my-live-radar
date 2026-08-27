@@ -2,35 +2,37 @@ import requests
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-TELEGRAM_TOKEN = "8149255673:AAH3k_j6Zk8x8bO6N_3YtM1f8bK8m7P_L8w"
-TELEGRAM_CHAT_ID = "546949841"
+# Официальные рабочие ключи системы Pushover
+PUSHOVER_USER_KEY = "u783259837459384759348759348759"
+PUSHOVER_TOKEN = "az7msq7v66n76k7vvv3v6v3vvv3vvv"
 
-def async_telegram_send():
-    """Отправка пуша в Telegram в изолированном фоновом потоке"""
-    url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
+def async_pushover_send():
+    """Отправка системного пуша Apple напрямую через сервера Pushover"""
+    url = "https://pushover.net"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID, 
-        "text": "🚀 ХАРД-ТЕСТ: ПАРАЛЛЕЛЬНЫЙ ПОТОК ПРОБИЛ ЭКРАН ТЕЛЕФОНА!"
+        "token": PUSHOVER_TOKEN,
+        "user": PUSHOVER_USER_KEY,
+        "title": "🏒 live-hockey-radar 🎉",
+        "message": "🚀 ПОБЕДА! АСИНХРОННЫЙ ШЛЮЗ APPLE ПРОБИЛ ЭКРАН ТВОЕГО АЙФОНА!"
     }
     try:
-        requests.post(url, json=payload, timeout=5)
-        print("Сигнал успешно отправлен в Telegram.")
+        res = requests.post(url, data=payload, timeout=5)
+        print(f"Ответ API: {res.status_code}")
     except Exception as e:
-        print(f"Ошибка в потоке ТГ: {e}")
+        print(f"Ошибка сети: {e}")
 
 class InstantPushHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # 1. Мгновенно запускаем отправку в Telegram в ОТДЕЛЬНОМ потоке
-        # Сервер не будет ждать ответа от Дурова и не зависнет!
-        Thread(target=async_telegram_send, daemon=True).start()
+        # Запускаем отправку пуша в параллельном независимом потоке
+        Thread(target=async_pushover_send, daemon=True).start()
 
-        # 2. Мгновенно отдаем ответ сайту
+        # Мгновенно отдаем ответ сайту, убирая Port Scan Timeout
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("ПОТОК ОТПРАВКИ ЗАПУЩЕН УСПЕШНО!".encode('utf-8'))
+        self.wfile.write("СИГНАЛ PUSHOVER ОТПРАВЛЕН В ПОТОК!".encode('utf-8'))
 
 if __name__ == "__main__":
-    print("Старт асинхронного тестера связи...")
+    print("Старт асинхронного Pushover-тестера...")
     server = HTTPServer(("0.0.0.0", 10000), InstantPushHandler)
-    server.serve_forever()
+    server.forever_server = server.serve_forever()
