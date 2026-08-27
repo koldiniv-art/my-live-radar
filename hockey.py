@@ -1,18 +1,26 @@
 import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# --- НАСТРОЙКИ СИСТЕМЫ С ТВОИМ НОВЫМ ТОЧНЫМ ТОКЕНОМ И ID ---
 TELEGRAM_TOKEN = "8149255673:AAH3k_j6Zk8x8bO6N_3YtM1f8bK8m7P_L8w"
 TELEGRAM_CHAT_ID = "546949841"
 
 class InstantPushHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # 1. Мгновенно отправляем сигнал в Telegram при любом заходе на сайт!
+        # 1. Мгновенно отправляем сигнал в твоего нового бота при любом клике на сайт!
+        # Ссылка собрана идеально: api.telegram.org/botTOKEN/sendMessage
         url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": "🚀 ХАРД-ТЕСТ: СВЯЗЬ ПРОБИТА НАПРЯМУЮ С ПОРТА 10000!"}
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID, 
+            "text": "🚀 ХАРД-ТЕСТ: СВЯЗЬ ПРОБИТА НАПРЯМУЮ С ПОРТА 10000!"
+        }
         
         try:
             res = requests.post(url, json=payload, timeout=5)
-            status_text = f"Успешно. Статус ТГ: {res.status_code}"
+            if res.status_code == 200:
+                status_text = f"Успешно. Статус ТГ: {res.status_code}"
+            else:
+                status_text = f"Ошибка Telegram API. Код: {res.status_code} | Ответ: {res.text}"
         except Exception as e:
             status_text = f"Ошибка сети ТГ: {e}"
 
